@@ -16,11 +16,14 @@ export default function AuthModal({ isOpen, onClose }) {
     setLoading(true);
     setError("");
 
-    const clientId = "54908343";
-    const redirectUri = "http://localhost:5173/auth/callback";
+    // ВАЖНО: Замените на ваш реальный client_id из настроек приложения VK
+    // Создайте приложение на https://vk.com/editapp?act=create
+    const clientId = "54912245";
+    const redirectUri = encodeURIComponent("http://localhost:5173/auth/callback");
     const state = Math.random().toString(36).substring(7);
     
-    const vkUrl = `https://oauth.vk.com/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&display=popup&response_type=code&state=${state}&scope=email`;
+    // Используем implicit grant (response_type=token) — подходит для SPA
+    const vkUrl = `https://oauth.vk.com/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&display=popup&response_type=token&state=${state}&scope=email&v=5.131`;
     
     const width = 600;
     const height = 700;
@@ -29,11 +32,42 @@ export default function AuthModal({ isOpen, onClose }) {
     
     const popup = window.open(vkUrl, "vk_auth", `width=${width},height=${height},left=${left},top=${top}`);
 
-    // Таймаут если popup закрыт
+    if (!popup) {
+      setError("Попросите браузер разрешить всплывающие окна для этого сайта");
+      setLoading(false);
+      return;
+    }
+
+    // Слушаем ответ от popup
+    const messageHandler = (event) => {
+      if (event.origin !== "http://localhost:5173") return;
+      
+      if (event.data.type === "vk_auth_success") {
+        const userData = event.data.user;
+        login(userData);
+        onClose();
+        window.removeEventListener("message", messageHandler);
+        setLoading(false);
+      }
+      
+      if (event.data.type === "vk_auth_error") {
+        setError(event.data.error || "Ошибка авторизации");
+        window.removeEventListener("message", messageHandler);
+        setLoading(false);
+      }
+    };
+
+    window.addEventListener("message", messageHandler);
+
+    // Проверяем, закрыт ли popup
     const checkClosed = setInterval(() => {
       if (popup && popup.closed) {
         clearInterval(checkClosed);
-        setLoading(false);
+        window.removeEventListener("message", messageHandler);
+        if (loading) {
+          setError("Окно авторизации было закрыто");
+          setLoading(false);
+        }
       }
     }, 500);
   };
