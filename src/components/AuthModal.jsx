@@ -6,74 +6,132 @@ export default function AuthModal({ isOpen, onClose }) {
   const { user, login } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const scriptRef = useRef(null);
+  const messageHandlerRef = useRef(null);
 
   const handleLogout = () => {
     login(null);
     onClose();
   };
 
-  // Загружаем VK ID SDK
-  useEffect(() => {
-    if (scriptRef.current) return;
-
-    const script = document.createElement("script");
-    script.src = "https://unpkg.com/@vkid/sdk@3.4.1/dist/sdk/index.js";
-    script.async = true;
-    document.body.appendChild(script);
-    scriptRef.current = script;
-  }, []);
-
-  const handleVKLogin = async () => {
+  const handleVKLogin = () => {
     setLoading(true);
     setError("");
 
-    try {
-      const VKID = window.VKIDSDK;
-      if (!VKID) {
-        setError("Не загрузился модуль VK ID. Обновите страницу.");
-        setLoading(false);
-        return;
-      }
+    const clientId = "54912245";
+    const redirectUri = "http://localhost:5173/auth/callback";
+    const state = Math.random().toString(36).substring(7);
+    
+    // VK Web App Authorization — работает с localhost
+    const vkUrl = `https://oauth.vk.com/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&display=popup&response_type=token&state=${state}&v=5.131&scope=offline`;
+    
+    const width = 600;
+    const height = 700;
+    const left = (screen.width - width) / 2;
+    const top = (screen.height - height) / 2;
+    
+    const popup = window.open(vkUrl, "vk_auth", `width=${width},height=${height},left=${left},top=${top},popup=1`);
 
-      const result = await VKID.openAuth({
-        clientId: "54912245",
-        display: "mobile",
-        scope: "photo",
-        responseMode: "callback",
-        source: "LOWCODE",
-      });
-
-      if (result.error === "USER_IDENTITY") {
-        // Получаем данные пользователя из токена
-        const response = await fetch(
-          `https://api.vk.com/method/users.get?user_ids=${result.userId}&v=5.131&fields=photo_200,name`
-        );
-        const data = await response.json();
-
-        if (data.response?.[0]) {
-          const user = {
-            id: result.userId,
-            first_name: data.response[0].first_name,
-            last_name: data.response[0].last_name,
-            username: data.response[0].username,
-            avatar: data.response[0].photo_200,
-            provider: "vk",
-            token: result.accessToken,
-          };
-          login(user);
-          onClose();
-        } else {
-          setError("Не удалось получить данные пользователя");
-        }
-      } else if (result.error) {
-        setError(result.errorDescription || "Ошибка авторизации");
-      }
-    } catch (e) {
-      console.error("VK Auth error:", e);
-      setError("Ошибка подключения к VK ID");
+    if (!popup || popup.closed) {
+      setError("Попросите браузер разрешить всплывающие окна");
+      setLoading(false);
+      return;
     }
-    setLoading(false);
+
+    // Создаём popup-страницу для приёма токена
+    const callbackHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head><title>Вход через VK</title></head>
+      <body style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0a0a0a;color:#fff;font-family:Inter,sans-serif;margin:0">
+        <p>Обработка входа...</p>
+        <script>
+          // Парсим hash из URL
+          const hash = window.location.hash.substring(1);
+          const params = new URLSearchParams(hash);
+          const accessToken = params.get("access_token");
+          const userId = params.get("user_id");
+          const expires = params.get("expires_at");
+          
+          if (accessToken && userId) {
+            // Запрашиваем данные пользователя
+            fetch("https://api.vk.com/method/users.get?user_ids=" + userId + "&v=5.131&fields=photo_200,name")
+              .then(r => r.json())
+              .then(data => {
+                if (data.response && data.response[0]) {
+                  const user = {
+                    id: parseInt(userId),
+                    first_name: data.response[0].first_name,
+                    last_name: data.response[0].last_name,
+                    username: data.response[0].username,
+                    avatar: data.response[0].photo_200,
+                    provider: "vk",
+                    token: accessToken,
+                    expires: expires ? parseInt(expires) : 0
+                  };
+                  window.opener.postMessage({ type: "vk_auth_success", user }, "*");
+                } else {
+                  // Даже без фото — создаём пользователя
+                  const user = {
+                    id: parseInt(userId),
+                    first_name: "Пользователь",
+                    provider: "vk",
+                    token: accessToken
+                  };
+                  window.opener.postMessage({ type: "vk_auth_success", user }, "*");
+                }
+              })
+              .catch(() => {
+                const user = {
+                  id: parseInt(userId),
+                  first_name: "Пользователь",
+                  provider: "vk",
+                  token: accessToken
+                };
+                window.opener.postMessage({ type: "vk_auth_success", user }, "*");
+              })
+              .finally(() => window.close());
+          } else {
+            const error = params.get("error") || "Не получен токен";
+            window.opener.postMessage({ type: "vk_auth_error", error }, "*");
+            window.close();
+          }
+        </script>
+      </body>
+      </html>
+    `;
+
+    // Открываем callback как data URI
+    const callbackUrl = "data:text/html;charset=utf-8," + encodeURIComponent(callbackHtml);
+    popup.location.href = callbackUrl;
+
+    // Слушаем сообщения от popup
+    messageHandlerRef.current = (event) => {
+      if (event.data?.type === "vk_auth_success") {
+        const userData = event.data.user;
+        login(userData);
+        onClose();
+        setLoading(false);
+      }
+      
+      if (event.data?.type === "vk_auth_error") {
+        setError(event.data.error || "Ошибка авторизации");
+        setLoading(false);
+      }
+    };
+
+    window.addEventListener("message", messageHandlerRef.current);
+
+    // Проверяем, закрыт ли popup
+    const checkClosed = setInterval(() => {
+      if (popup && popup.closed) {
+        clearInterval(checkClosed);
+        window.removeEventListener("message", messageHandlerRef.current);
+        if (loading) {
+          setError("Окно авторизации было закрыто");
+          setLoading(false);
+        }
+      }
+    }, 500);
   };
 
   const handleTelegramLogin = () => {
@@ -116,6 +174,15 @@ export default function AuthModal({ isOpen, onClose }) {
       }
     }, 500);
   };
+
+  // Очистка при размонтировании
+  useEffect(() => {
+    return () => {
+      if (messageHandlerRef.current) {
+        window.removeEventListener("message", messageHandlerRef.current);
+      }
+    };
+  }, []);
 
   if (!isOpen) return null;
 
@@ -162,7 +229,7 @@ export default function AuthModal({ isOpen, onClose }) {
                 <svg className="auth-icon" viewBox="0 0 24 24" width="20" height="20">
                   <path fill="#4C75A3" d="M12.785 16.241s.288-.032.436-.194c.136-.148.132-.427.132-.427s-.02-1.304.587-1.496c.598-.189 1.367 1.26 2.182 1.816.617.42 1.085.328 1.085.328l2.18-.03s1.14-.07.6-.964c-.044-.073-.316-.661-1.624-1.868-1.37-1.263-1.186-1.059.464-3.266.998-1.344 1.397-2.167 1.273-2.52-.12-.335-.856-.246-.856-.246l-2.453.015s-.182-.025-.317.056c-.132.079-.217.264-.217.264s-.39 1.038-.91 1.92c-1.098 1.863-1.537 1.963-1.716 1.846-.417-.272-.313-1.095-.313-1.679 0-1.826.277-2.587-.539-2.784-.27-.065-.47-.108-1.16-.115-.887-.01-1.639.003-2.063.21-.283.138-.5.444-.367.462.164.021.535.1.732.368.254.346.245 1.12.245 1.12s.146 2.144-.34 2.41c-.333.183-.79-.19-1.773-1.894-.503-.873-.883-1.838-.883-1.838s-.073-.18-.204-.277c-.158-.118-.38-.155-.38-.155l-2.33.015s-.35.01-.478.162c-.114.135-.009.414-.009.414s1.837 4.3 3.92 6.467c1.907 1.987 4.073 1.857 4.073 1.857h.982z"/>
                 </svg>
-                {loading ? "Вход..." : "Войти через VK ID"}
+                {loading ? "Вход..." : "Войти через VK"}
               </button>
 
               <button className="auth-btn telegram" onClick={handleTelegramLogin} disabled={loading}>
